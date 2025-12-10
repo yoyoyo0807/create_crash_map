@@ -1,82 +1,97 @@
+# pages/2_🧪_シナリオシミュレーション.py
 import streamlit as st
-from utils.data_loader import (
-    load_mesh_location, load_mesh_hospital_matrix, load_hospital_scores
-)
-from utils.simulator import (
-    apply_elderly_scenario, apply_event_scenario, apply_hospital_stop_scenario
-)
-from utils.visualizer import plot_mesh_risk_map
+import plotly.express as px
+import pandas as pd
 
-st.title("🧪 シナリオシミュレーター")
+from utils.data_loader import load_mesh_location
+from utils.summaries import summarize_scenario
 
-df_mesh = load_mesh_location()
-df_hospmat = load_mesh_hospital_matrix()
-df_hscores = load_hospital_scores()
+st.title("🧪 シナリオシミュレーション")
 
-# -------------------------
-# Sidebar
-# -------------------------
-st.sidebar.header("シナリオ設定")
+st.markdown(
+    """
+ここでは、**「もし特定のゾーンの負荷が増えたら？」** といった  
+**反事実シナリオ** を、簡易モデルで試すことができます。
 
-scenario = st.sidebar.selectbox(
-    "シナリオタイプ",
-    ["高齢化シフト (+20%)", "イベント開催エリア急増", "大病院停止"]
+- 高リスクメッシュを何倍にするか  
+- 何メッシュまでを「イベント対象」とみなすか  
+
+を指定すると、**Before / After の地図と自動インサイト** が表示されます。
+"""
 )
 
-# -------------------------------------------------------
-# 高齢化シナリオ
-# -------------------------------------------------------
-if scenario == "高齢化シフト (+20%)":
-    factor = st.sidebar.slider("増加率", 1.0, 1.5, 1.2)
-    df_sim = apply_elderly_scenario(df_mesh, factor=factor)
+df_base = load_mesh_location()
 
-# -------------------------------------------------------
-# イベント開催
-# -------------------------------------------------------
-elif scenario == "イベント開催エリア急増":
-    event_mesh_ids = st.sidebar.multiselect(
-        "イベント開催メッシュを選択",
-        df_mesh["mesh_id"].unique()
+# --- シナリオ設定 UI ---
+st.sidebar.subheader("🧪 シナリオ設定")
+
+top_k = st.sidebar.slider("イベント対象とする高リスクメッシュ数", 5, 100, 20, step=5)
+multiplier = st.sidebar.slider("対象メッシュのリスク倍率", 1.0, 5.0, 2.0, step=0.1)
+
+st.markdown(
+    f"""
+**シナリオ定義：**  
+- risk_score 上位 **{top_k} メッシュ** をイベント対象とする  
+- 対象メッシュの risk_score を **× {multiplier:.1f} 倍** に増加させる（簡易モデル）
+"""
+)
+
+# --- Before / After データ作成 ---
+df_before = df_base.copy()
+
+df_after = df_base.copy()
+df_after = df_after.sort_values("risk_score", ascending=False)
+target_ids = df_after["mesh_id"].head(top_k).tolist()
+
+mask = df_after["mesh_id"].isin(target_ids)
+df_after.loc[mask, "risk_score"] = df_after.loc[mask, "risk_score"] * multiplier
+
+# 元の並びに戻しておく
+df_after = df_after.sort_values("mesh_id").reset_index(drop=True)
+df_before = df_before.sort_values("mesh_id").reset_index(drop=True)
+
+# --- Insight Layer: シナリオサマリー ---
+st.markdown("---")
+st.markdown("## 📊 シナリオ結果サマリー")
+st.markdown(summarize_scenario(df_before, df_after))
+
+# --- 地図表示 ---
+st.markdown("---")
+st.markdown("## 🗺 Before / After 地図比較")
+
+def make_fig(df: pd.DataFrame, title: str):
+    return px.scatter_mapbox(
+        df,
+        lat="lat",
+        lon="lon",
+        color="risk_score",
+        size="n_cases",
+        hover_name="mesh_id",
+        hover_data={"risk_score": ":.3f", "n_cases": True, "lat": False, "lon": False},
+        color_continuous_scale="Reds",
+        size_max=20,
+        zoom=11,
+        height=500,
+        title=title,
     )
-    factor = st.sidebar.slider("負荷倍率", 1.0, 5.0, 3.0)
 
-    df_sim = apply_event_scenario(df_mesh, event_mesh_ids, factor=factor)
+fig_before = make_fig(df_before, "Before: ベースライン risk_score")
+fig_before.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=30, b=0))
 
-# -------------------------------------------------------
-# 病院停止
-# -------------------------------------------------------
-elif scenario == "大病院停止":
-    target_hosp = st.sidebar.multiselect(
-        "停止させる病院を選択",
-        df_hscores["hospital_name"].unique()
-    )
-    affected_meshes = apply_hospital_stop_scenario(df_hospmat, target_hosp)
-    df_sim = apply_event_scenario(df_mesh, affected_meshes, factor=2.0)
+fig_after = make_fig(df_after, "After: シナリオ適用後 risk_score")
+fig_after.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=30, b=0))
 
-# -------------------------
-# Maps
-# -------------------------
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("Before")
-    fig1 = plot_mesh_risk_map(df_mesh, color_col="risk_score", title="現状")
-    st.plotly_chart(fig1, use_container_width=True)
-
+    st.plotly_chart(fig_before, use_container_width=True)
 with col2:
-    st.subheader("After")
-    fig2 = plot_mesh_risk_map(df_sim, color_col="risk_score_scenario", title="シナリオ後")
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig_after, use_container_width=True)
 
-# -------------------------
-# Summary
-# -------------------------
-st.subheader("影響サマリー")
-
-df_sim["diff"] = df_sim["risk_score_scenario"] - df_sim["risk_score"]
-
-st.write("**リスク上昇メッシュ TOP 10**")
-st.dataframe(df_sim.sort_values("diff", ascending=False).head(10))
-
-st.write("**差分ヒストグラム**")
-st.bar_chart(df_sim["diff"])
+st.info(
+    """
+**ポイント：**  
+- 「平均リスク」「悪化メッシュ数」「特に悪化したメッシュ TOP3」などが  
+  上のサマリーで自動算出されています。  
+- 本気で政策検討する場合は、ここに **QUBO ベースの再配分ロジック** を差し替えるイメージです。
+"""
+)
