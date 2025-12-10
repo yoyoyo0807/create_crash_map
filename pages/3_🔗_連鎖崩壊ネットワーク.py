@@ -1,113 +1,121 @@
-import streamlit as st
-import pandas as pd
+# pages/3_🌐_連鎖崩壊ネットワーク.py
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-import networkx as nx
-import plotly.graph_objects as go
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
-from utils.data_loader import load_mesh_hospital_matrix
+from utils.data_loader import load_mesh_hospital_matrix, load_hospital_scores
+from utils.summaries import summarize_network
 
-st.title("🔗 連鎖崩壊ネットワーク")
+st.title("🌐 連鎖崩壊ネットワーク")
 
-df = load_mesh_hospital_matrix()
+st.markdown(
+    """
+`mesh_hospital_case_matrix.csv` に基づき、  
 
-# -------------------------
-# 1. ピボット → メッシュ × 病院 の行列
-# -------------------------
-mat = df.pivot_table(
+- メッシュ → 病院の依存度  
+- それを通じた **病院同士の「つながりの強さ」**  
+
+を集約して、**連鎖崩壊の観点から重要な病院** を抽出します。
+"""
+)
+
+df_mat = load_mesh_hospital_matrix()
+df_scores = load_hospital_scores()
+
+# --- 病院レベルの集計 ---
+df_hosp = (
+    df_mat.groupby("hospital_name")
+    .agg(
+        total_cases=("n_cases", "sum"),
+        mean_risk=("risk_score", "mean"),
+        n_meshes=("mesh_id", "nunique"),
+    )
+    .reset_index()
+)
+
+# --- 病院間の「共有メッシュ」に基づく簡易中心性 ---
+# rows: mesh_id, cols: hospital_name, value: share
+df_wide = df_mat.pivot_table(
     index="mesh_id",
     columns="hospital_name",
     values="share",
-    fill_value=0
+    fill_value=0.0,
 )
 
-mesh_ids = mat.index.tolist()
+# 共起重み行列 W = X^T X
+X = df_wide.to_numpy()  # shape: (#mesh, #hospital)
+W = X.T @ X             # shape: (#hospital, #hospital)
 
-# -------------------------
-# Sidebar: focus
-# -------------------------
-st.sidebar.header("設定")
+# 対角成分は自分自身との共起なので無視しても良いが、ここでは含めた総和で重み付け“中心性”とする
+centrality = W.sum(axis=1)
 
-focus_mesh = st.sidebar.selectbox(
-    "フォーカスするメッシュ",
-    mesh_ids
+df_net = df_hosp.copy()
+df_net["centrality"] = centrality
+
+# hospital_systemic_indices とマージ（あれば）
+if "hospital_name" in df_scores.columns:
+    df_net = df_net.merge(
+        df_scores[
+            [
+                "hospital_name",
+                "SSS",
+                "CDS",
+                "SE",
+            ]
+        ],
+        on="hospital_name",
+        how="left",
+    )
+
+# --- Insight Layer: サマリー ---
+st.markdown("---")
+st.markdown(summarize_network(df_net))
+
+st.markdown("---")
+st.markdown("## 📈 中心性（連鎖リスク）の高い病院")
+
+top_n = st.slider("表示する病院数（中心性上位）", 5, 50, 15, step=5)
+
+df_top = df_net.sort_values("centrality", ascending=False).head(top_n)
+
+# テーブル
+st.dataframe(
+    df_top[
+        [
+            "hospital_name",
+            "centrality",
+            "total_cases",
+            "n_meshes",
+            "mean_risk",
+            "SSS",
+            "CDS",
+            "SE",
+        ]
+    ],
+    use_container_width=True,
 )
 
-th = st.sidebar.slider(
-    "類似度の閾値",
-    0.1, 0.9, 0.3
+# バーチャート
+fig = px.bar(
+    df_top,
+    x="hospital_name",
+    y="centrality",
+    hover_data=["total_cases", "n_meshes", "mean_risk", "SSS", "CDS", "SE"],
+    title="病院別 連鎖中心性（共有メッシュに基づく）",
 )
-
-# -------------------------
-# 類似度計算
-# -------------------------
-sim = cosine_similarity(mat.values)
-sim_df = pd.DataFrame(sim, index=mesh_ids, columns=mesh_ids)
-
-# ネットワーク構築
-G = nx.Graph()
-
-for i, m1 in enumerate(mesh_ids):
-    for j, m2 in enumerate(mesh_ids):
-        if i < j and sim[i, j] >= th:
-            G.add_edge(m1, m2, weight=sim[i, j])
-
-# -------------------------
-# Plotly force layout
-# -------------------------
-pos = nx.spring_layout(G, seed=42)
-
-edge_x = []
-edge_y = []
-
-for e in G.edges():
-    x0, y0 = pos[e[0]]
-    x1, y1 = pos[e[1]]
-    edge_x += [x0, x1, None]
-    edge_y += [y0, y1, None]
-
-edge_trace = go.Scatter(
-    x=edge_x, y=edge_y,
-    line=dict(width=0.5, color="#888"),
-    hoverinfo="none",
-    mode="lines"
-)
-
-node_x = []
-node_y = []
-node_color = []
-
-for node in G.nodes():
-    x, y = pos[node]
-    node_x.append(x)
-    node_y.append(y)
-    node_color.append(sim_df.loc[focus_mesh, node])
-
-node_trace = go.Scatter(
-    x=node_x, y=node_y,
-    mode="markers",
-    marker=dict(
-        size=10,
-        color=node_color,
-        colorscale="RdYlGn_r",
-        showscale=True
-    ),
-    text=list(G.nodes())
-)
-
-fig = go.Figure(data=[edge_trace, node_trace])
 fig.update_layout(
-    title="メッシュ類似ネットワーク",
-    showlegend=False,
-    height=600,
-    margin=dict(l=0, r=0, t=40, b=0)
+    xaxis_tickangle=45,
+    height=500,
+    margin=dict(l=0, r=0, t=40, b=120),
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------
-# Similarity ranking
-# -------------------------
-st.subheader(f"類似度ランキング：{focus_mesh}")
-sim_rank = sim_df.loc[focus_mesh].sort_values(ascending=False)
-st.dataframe(sim_rank.head(20))
+st.info(
+    """
+**読み方：**  
+- 中心性が高い病院は、多数のメッシュで他の病院と「シェアされている」ノードです。  
+- ここが停止すると、周辺の病院に負荷が波及しやすく、**システミックな崩壊リスク** が高いと解釈できます。  
+- SSS / CDS / SE を組み合わせることで、**「局所的に忙しい」 vs 「ネットワーク的に危ない」** を切り分けられます。
+"""
+)
