@@ -1,0 +1,13 @@
+# --- Core ---
+streamlit==1.32.2
+pandas==2.2.1
+numpy==1.26.4
+
+# --- Visualization ---
+plotly==5.18.0
+
+# --- Machine Learning (for cosine similarity) ---
+scikit-learn==1.4.1
+
+# --- Utils ---
+pydeck==0.9.1
